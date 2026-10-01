@@ -36,7 +36,11 @@ export default defineManifest(({ mode }) => {
       }
     ],
     externally_connectable: {
-      matches: ["https://leverora.com/*", ...(isDev ? ["http://localhost:3000/*"] : [])]
+      // leverora.com (bare) 308-redirects to www.leverora.com — the page
+      // that actually calls chrome.runtime.sendMessage ends up served from
+      // www, so both must be listed or the bare-domain entry never matches
+      // anything in practice.
+      matches: ["https://leverora.com/*", "https://www.leverora.com/*", ...(isDev ? ["http://localhost:3000/*"] : [])]
     },
     action: {
       default_title: "Leverora"
