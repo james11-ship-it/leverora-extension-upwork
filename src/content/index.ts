@@ -7,11 +7,17 @@ import { injectText } from "./injector";
 
 let stopIncremental: (() => void) | null = null;
 let currentThreadKey: string | null = null;
-
-const port = chrome.runtime.connect({ name: CONTENT_PORT_NAME });
+let port: chrome.runtime.Port | null = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 20;
 
 function send(msg: ContentToBackgroundMsg) {
-  port.postMessage(msg);
+  try {
+    port?.postMessage(msg);
+  } catch {
+    // Port is closed (service worker went to sleep). The disconnect handler
+    // reconnects and re-announces the thread, which re-sends everything.
+  }
 }
 
 function reportFailure(reason: string) {
@@ -59,7 +65,7 @@ async function onThreadChange(threadKey: string | null) {
   await attachToThread(threadKey);
 }
 
-port.onMessage.addListener((msg: BackgroundToContentMsg) => {
+function handleBackgroundMessage(msg: BackgroundToContentMsg) {
   if (msg.type === "read_full_thread") {
     void (async () => {
       const config = await getSelectorConfig();
@@ -84,6 +90,39 @@ port.onMessage.addListener((msg: BackgroundToContentMsg) => {
       if (!ok) reportFailure("compose_field_not_found");
     })();
   }
-});
+}
 
+function scheduleReconnect() {
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return;
+  reconnectAttempts += 1;
+  setTimeout(() => {
+    connectPort();
+    if (port) {
+      reconnectAttempts = 0;
+      // The restarted service worker lost its in-memory state, so announce
+      // the current thread again and re-read its messages.
+      if (currentThreadKey) void onThreadChange(currentThreadKey);
+    } else {
+      scheduleReconnect();
+    }
+  }, 500);
+}
+
+function connectPort() {
+  try {
+    port = chrome.runtime.connect({ name: CONTENT_PORT_NAME });
+  } catch {
+    // Extension was reloaded or updated: this content script is orphaned.
+    port = null;
+    return;
+  }
+  const thisPort = port;
+  thisPort.onMessage.addListener(handleBackgroundMessage);
+  thisPort.onDisconnect.addListener(() => {
+    if (port === thisPort) port = null;
+    scheduleReconnect();
+  });
+}
+
+connectPort();
 watchThreadChanges((threadKey) => void onThreadChange(threadKey));
