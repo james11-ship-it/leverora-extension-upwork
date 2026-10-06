@@ -26,6 +26,9 @@ let activeSuggestion: Suggestion | null = null;
 let suggestionStatus: "idle" | "loading" | "done" | "error" = "idle";
 let suggestionError: string | null = null;
 let contentPort: chrome.runtime.Port | null = null;
+// Batches that arrive before thread_detected finishes its async thread-store
+// lookup are held here instead of being dropped.
+const pendingMessages = new Map<string, Msg[]>();
 
 let creditBalance: number | null = null;
 let creditBalanceStatus: FetchStatus = "idle";
@@ -169,7 +172,10 @@ chrome.runtime.onConnect.addListener((port) => {
       case "thread_detected":
         void getThreadMeta(msg.thread.threadKey).then((meta) => {
           activeThread = { ...msg.thread, ...meta };
-          activeMessages = [];
+          const buffered = pendingMessages.get(msg.thread.threadKey) ?? [];
+          pendingMessages.clear();
+          activeMessages = [...new Map(buffered.map((m) => [m.id, m])).values()].sort((x, y) => x.timestamp - y.timestamp);
+          activeThread = { ...activeThread, messageCount: activeMessages.length, lastMessageId: activeMessages.at(-1)?.id ?? null };
           resetSuggestionState();
           resetEstimates();
           resetPlanState(meta.planId);
@@ -198,7 +204,10 @@ chrome.runtime.onConnect.addListener((port) => {
         void broadcastState();
         break;
       case "messages_batch": {
-        if (activeThread?.threadKey !== msg.threadKey) break;
+        if (activeThread?.threadKey !== msg.threadKey) {
+        pendingMessages.set(msg.threadKey, [...(pendingMessages.get(msg.threadKey) ?? []), ...msg.messages]);
+        break;
+      }
         const byId = new Map(activeMessages.map((m) => [m.id, m]));
         for (const m of msg.messages) byId.set(m.id, m);
         activeMessages = [...byId.values()].sort((a, b) => a.timestamp - b.timestamp);
