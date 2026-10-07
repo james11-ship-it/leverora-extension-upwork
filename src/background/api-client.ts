@@ -28,6 +28,11 @@ async function authedFetch(path: string, init: RequestInit = {}): Promise<Respon
   return response;
 }
 
+/** HTTP 402 means the account has too few credits; the panel turns this into a "Buy credits" prompt. */
+function failureMessage(prefix: string, status: number): string {
+  return status === 402 ? "insufficient_credits" : prefix + "_" + status;
+}
+
 export async function fetchSelectorConfig(platform: "upwork"): Promise<SelectorConfig | null> {
   try {
     const response = await authedFetch(`/api/selectors?platform=${platform}`);
@@ -127,7 +132,7 @@ export async function streamSuggestions(params: StreamSuggestionsParams, onUpdat
     return { ok: false, message: err instanceof Error ? err.message : "network_error" };
   }
 
-  if (!response.ok) return { ok: false, message: `suggest_failed_${response.status}` };
+  if (!response.ok) return { ok: false, message: failureMessage("suggest_failed", response.status) };
 
   return consumeSSE(response, (data) => {
     const payload = JSON.parse(data) as SuggestFrame;
@@ -165,7 +170,7 @@ export async function createPlan(params: CreatePlanParams): Promise<PlanResult> 
       method: "POST",
       body: JSON.stringify(params)
     });
-    if (!response.ok) return { ok: false, message: `plan_failed_${response.status}` };
+    if (!response.ok) return { ok: false, message: failureMessage("plan_failed", response.status) };
     return { ok: true, plan: planFromResponse((await response.json()) as PlanResponse) };
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : "network_error" };
@@ -178,7 +183,7 @@ export async function revisePlan(planId: string, note: string, attachments: Atta
       method: "POST",
       body: JSON.stringify({ note, attachments })
     });
-    if (!response.ok) return { ok: false, message: `plan_revise_failed_${response.status}` };
+    if (!response.ok) return { ok: false, message: failureMessage("plan_revise_failed", response.status) };
     return { ok: true, plan: planFromResponse((await response.json()) as PlanResponse) };
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : "network_error" };
@@ -196,7 +201,7 @@ export async function executePlan(planId: string): Promise<ExecuteResult> {
       method: "POST",
       body: JSON.stringify({ plan_id: planId })
     });
-    if (!response.ok) return { ok: false, message: `execute_failed_${response.status}` };
+    if (!response.ok) return { ok: false, message: failureMessage("execute_failed", response.status) };
     const payload = (await response.json()) as ExecuteResponse;
     return { ok: true, jobId: payload.job_id };
   } catch (err) {
