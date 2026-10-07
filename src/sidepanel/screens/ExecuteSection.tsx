@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { usePanelStore } from "../store";
+import { ErrorNotice } from "./ErrorNotice";
 
 function ConfirmExecuteModal({ onClose }: { onClose: () => void }) {
   const estimate = usePanelStore((s) => s.estimates.execute);
@@ -23,11 +24,7 @@ function ConfirmExecuteModal({ onClose }: { onClose: () => void }) {
           This runs automated code execution in a sandbox (Claude Agent SDK, on the Leverora side) for
           {estimate !== undefined ? ` ≈${estimate} credits` : " an estimated cost"}. This is the most expensive action — it can't be undone once started.
         </p>
-        {insufficientCredits && (
-          <p className="text-xs" style={{ color: "var(--danger)" }}>
-            Not enough credits for this.
-          </p>
-        )}
+        {insufficientCredits && <ErrorNotice message="insufficient_credits" />}
         <button
           onClick={() => {
             executePlan();
@@ -69,9 +66,7 @@ function JobProgressView() {
 
   if (executeStatus === "error") {
     return (
-      <p className="text-xs" style={{ color: "var(--danger)" }}>
-        Failed: {executeError}
-      </p>
+      <ErrorNotice message={executeError} />
     );
   }
 
@@ -97,6 +92,7 @@ export function ExecuteSection() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const plan = usePanelStore((s) => s.plan);
   const executeStatus = usePanelStore((s) => s.executeStatus);
+  const executeError = usePanelStore((s) => s.executeError);
   const requestEstimate = usePanelStore((s) => s.requestEstimate);
   const estimate = usePanelStore((s) => s.estimates.execute);
 
@@ -107,10 +103,11 @@ export function ExecuteSection() {
 
   if (!plan) return null;
 
-  const isActive = executeStatus !== "idle";
+  const isActive = executeStatus !== "idle" && executeStatus !== "error";
 
   return (
     <div className="border-b px-3 py-3" style={{ borderColor: "var(--border)" }}>
+      {executeStatus === "error" && <ErrorNotice message={executeError} />}
       {isActive ? (
         <JobProgressView />
       ) : (
