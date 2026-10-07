@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Attachment, PlanRef } from "@shared/types";
 import { usePanelStore } from "../store";
 import { ExecuteSection } from "./ExecuteSection";
+import { ErrorNotice } from "./ErrorNotice";
 
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024; // 8MB — keeps base64 payloads reasonable over the messaging pipeline
 
@@ -130,10 +131,7 @@ function SuggestionsSection() {
   const error = usePanelStore((s) => s.suggestionError);
   const requestSuggestions = usePanelStore((s) => s.requestSuggestions);
 
-  const estimate = usePanelStore((s) => s.estimates.suggest);
   const canGenerate = messages.length > 0 && status !== "loading";
-  const priceLabel = estimate !== undefined ? ` · ≈${estimate} credits` : "";
-
   return (
     <div className="flex flex-col gap-2 border-b px-3 py-3" style={{ borderColor: "var(--border)" }}>
       <div className="flex items-center justify-between">
@@ -144,7 +142,7 @@ function SuggestionsSection() {
           className="rounded px-3 py-1 text-xs font-medium text-white disabled:opacity-40"
           style={{ background: "var(--accent)", borderRadius: "var(--radius-btn)" }}
         >
-          {status === "loading" ? "Generating…" : `Generate suggestions${priceLabel}`}
+          {status === "loading" ? "Generating…" : "Generate suggestions"}
         </button>
       </div>
 
@@ -154,11 +152,7 @@ function SuggestionsSection() {
         </p>
       )}
 
-      {status === "error" && (
-        <p className="text-xs" style={{ color: "var(--danger)" }}>
-          Failed: {error}
-        </p>
-      )}
+      {status === "error" && <ErrorNotice message={error} />}
 
       {suggestion && (
         <div className="flex flex-col gap-2">
@@ -287,11 +281,7 @@ function CreatePlanModal({ onClose }: { onClose: () => void }) {
               style={{ background: "var(--bg-elevated)", borderColor: "var(--border)", borderRadius: "var(--radius-card)" }}
             />
             <AttachmentPicker files={files} onChange={setFiles} />
-            {planStatus === "error" && (
-              <p className="text-xs" style={{ color: "var(--danger)" }}>
-                Failed: {planError}
-              </p>
-            )}
+            {planStatus === "error" && <ErrorNotice message={planError} />}
             <button
               onClick={() => createPlan(attachment, files)}
               disabled={building}
@@ -340,11 +330,7 @@ function ReviseSection({ plan }: { plan: PlanRef }) {
         style={{ background: "var(--bg-elevated)", borderColor: "var(--border)", borderRadius: "var(--radius-card)" }}
       />
       <AttachmentPicker files={files} onChange={setFiles} />
-      {planStatus === "error" && (
-        <p className="text-xs" style={{ color: "var(--danger)" }}>
-          Failed: {planError}
-        </p>
-      )}
+      {planStatus === "error" && <ErrorNotice message={planError} />}
       <button
         onClick={() => revisePlan(note, files)}
         disabled={!note.trim() || revising}
