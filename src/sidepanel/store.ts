@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { Attachment, CategorySlug, JobProgress, Msg, PlanRef, Suggestion, Thread } from "@shared/types";
-import type { BackgroundToPanelMsg, EstimateAction, ExecuteStatus, FetchStatus, PanelToBackgroundMsg, PlanStatus } from "@shared/messaging";
+import type { BackgroundToPanelMsg, EditSession, EstimateAction, ExecuteStatus, FetchStatus, PanelToBackgroundMsg, PlanStatus } from "@shared/messaging";
 
 type SuggestionStatus = "idle" | "loading" | "done" | "error";
 
@@ -21,6 +21,10 @@ type PanelState = {
   job: JobProgress | null;
   executeStatus: ExecuteStatus;
   executeError: string | null;
+  builtPlanVersion: number | null;
+  editSession: EditSession | null;
+  /** null = automatic: open until a plan exists, so the panel isn't a long scroll once you move on to planning. */
+  suggestionsOpen: boolean | null;
   loading: boolean;
   login: () => void;
   requestFullRead: () => void;
@@ -34,7 +38,14 @@ type PanelState = {
   revisePlan: (note: string, files: Attachment[]) => void;
   openPlan: () => void;
   executePlan: () => void;
+  updateProject: () => void;
   openProject: () => void;
+  setSuggestionsOpen: (open: boolean | null) => void;
+  editRevisePlan: (note: string, files: Attachment[]) => void;
+  editUpdateProject: () => void;
+  editOpenPlan: () => void;
+  editOpenProject: () => void;
+  closeEdit: () => void;
 };
 
 export const usePanelStore = create<PanelState>((_set, get) => ({
@@ -54,6 +65,9 @@ export const usePanelStore = create<PanelState>((_set, get) => ({
   job: null,
   executeStatus: "idle",
   executeError: null,
+  builtPlanVersion: null,
+  editSession: null,
+  suggestionsOpen: null,
   loading: true,
   login: () => send({ type: "login" }),
   requestFullRead: () => send({ type: "request_full_read" }),
@@ -70,7 +84,7 @@ export const usePanelStore = create<PanelState>((_set, get) => ({
     send({ type: "set_brief_notes", threadKey, notes });
   },
   requestSuggestions: () => {
-    usePanelStore.setState({ suggestionStatus: "loading", suggestionError: null });
+    usePanelStore.setState({ suggestionStatus: "loading", suggestionError: null, suggestionsOpen: true });
     send({ type: "request_suggestions" });
   },
   injectSuggestion: (text) => send({ type: "inject_suggestion", text }),
@@ -89,7 +103,17 @@ export const usePanelStore = create<PanelState>((_set, get) => ({
     usePanelStore.setState({ executeStatus: "starting", executeError: null, job: null });
     send({ type: "execute_plan" });
   },
-  openProject: () => send({ type: "open_project" })
+  updateProject: () => {
+    usePanelStore.setState({ executeStatus: "starting", executeError: null, job: null });
+    send({ type: "update_project" });
+  },
+  openProject: () => send({ type: "open_project" }),
+  setSuggestionsOpen: (open) => usePanelStore.setState({ suggestionsOpen: open }),
+  editRevisePlan: (note, files) => send({ type: "edit_revise_plan", note, files }),
+  editUpdateProject: () => send({ type: "edit_update_project" }),
+  editOpenPlan: () => send({ type: "edit_open_plan" }),
+  editOpenProject: () => send({ type: "edit_open_project" }),
+  closeEdit: () => send({ type: "close_edit" })
 }));
 
 function send(msg: PanelToBackgroundMsg) {
@@ -98,6 +122,8 @@ function send(msg: PanelToBackgroundMsg) {
 
 function applyState(msg: BackgroundToPanelMsg) {
   if (msg.type === "state") {
+    // A different thread gets a fresh, automatic suggestions toggle.
+    const threadChanged = usePanelStore.getState().thread?.threadKey !== msg.thread?.threadKey;
     usePanelStore.setState({
       authenticated: msg.authenticated,
       thread: msg.thread,
@@ -115,6 +141,9 @@ function applyState(msg: BackgroundToPanelMsg) {
       job: msg.job,
       executeStatus: msg.executeStatus,
       executeError: msg.executeError,
+      builtPlanVersion: msg.builtPlanVersion,
+      editSession: msg.editSession,
+      ...(threadChanged ? { suggestionsOpen: null } : {}),
       loading: false
     });
   } else if (msg.type === "thread_updated") {
