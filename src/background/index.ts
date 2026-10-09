@@ -1,9 +1,11 @@
-import type { Attachment, JobProgress, Msg, PlanRef, Suggestion, Thread } from "@shared/types";
+import type { Attachment, CategorySlug, JobProgress, Msg, PlanRef, Suggestion, Thread } from "@shared/types";
+import { CATEGORY_SLUGS } from "@shared/types";
 import { BILLING_URL, planUrl, projectUrl } from "@shared/config";
 import {
   CONTENT_PORT_NAME,
   type BackgroundToPanelMsg,
   type ContentToBackgroundMsg,
+  type EditSession,
   type EstimateAction,
   type ExecuteStatus,
   type FetchStatus,
@@ -42,6 +44,22 @@ let planError: string | null = null;
 let activeJob: JobProgress | null = null;
 let executeStatus: ExecuteStatus = "idle";
 let executeError: string | null = null;
+let builtPlanVersion: number | null = null;
+
+// "Change project" from leverora.com — kept in chrome.storage.session so it
+// survives the service worker being stopped while the user types a note.
+const EDIT_SESSION_KEY = "leverora:edit-session";
+let editSession: EditSession | null = null;
+const editSessionRestored: Promise<void> = chrome.storage.session
+  .get(EDIT_SESSION_KEY)
+  .then((stored) => {
+    const restored = stored[EDIT_SESSION_KEY] as EditSession | undefined;
+    if (!restored) return;
+    editSession = restored;
+    const job = restored.job;
+    if (job && (restored.executeStatus === "running" || restored.executeStatus === "starting")) watchEditJob(job.jobId);
+  })
+  .catch(() => undefined);
 
 function panelState(authenticated: boolean): Extract<BackgroundToPanelMsg, { type: "state" }> {
   return {
@@ -61,7 +79,9 @@ function panelState(authenticated: boolean): Extract<BackgroundToPanelMsg, { typ
     planError,
     job: activeJob,
     executeStatus,
-    executeError
+    executeError,
+    builtPlanVersion,
+    editSession
   };
 }
 
@@ -92,12 +112,12 @@ function resetEstimates() {
  * on Leverora" link still works; version/status just aren't shown until the
  * user revises it again in this session.
  */
-function restorePlanRef(planId: string | null): PlanRef | null {
-  return planId ? { planId, version: 1, status: "ready", pdfUrl: null } : null;
+function restorePlanRef(planId: string | null, version: number | null): PlanRef | null {
+  return planId ? { planId, version: version ?? 1, status: "ready", pdfUrl: null } : null;
 }
 
-function resetPlanState(planId: string | null) {
-  activePlan = restorePlanRef(planId);
+function resetPlanState(planId: string | null, version: number | null = null) {
+  activePlan = restorePlanRef(planId, version);
   planStatus = activePlan ? "ready" : "idle";
   planError = null;
 }
@@ -106,6 +126,7 @@ function resetExecuteState() {
   activeJob = null;
   executeStatus = "idle";
   executeError = null;
+  builtPlanVersion = null;
 }
 
 /** Context length is a rough proxy (plan §6 doesn't pin down the exact unit): total characters across the thread plus brief notes. */
@@ -133,7 +154,7 @@ async function refreshEstimate(action: EstimateAction) {
   const threadKey = activeThread.threadKey;
   estimateStatuses = { ...estimateStatuses, [action]: "loading" };
   void broadcastState();
-  const result = await fetchEstimate(action, currentContextLength());
+  const result = await fetchEstimate(action, currentContextLength(), activeThread.categorySlug ?? undefined);
   if (activeThread?.threadKey !== threadKey) return; // thread switched mid-request
   if (result.ok) {
     estimates = { ...estimates, [action]: result.estimate.credits };
@@ -145,10 +166,30 @@ async function refreshEstimate(action: EstimateAction) {
   }
 }
 
+/**
+ * A failed update must not lose the project it was updating: put the
+ * previous (still valid) project back so the user can open it or retry.
+ */
+function restoreAfterFailedUpdate(previousJob: JobProgress, previousBuiltVersion: number | null, message: string) {
+  activeJob = previousJob;
+  executeStatus = "done";
+  executeError = message;
+  builtPlanVersion = previousBuiltVersion;
+  void broadcastState();
+}
+
 /** Attaches to a job's SSE progress stream — used both right after starting a new job and when resuming one across a service worker restart. */
-function watchJob(jobId: string, threadKey: string) {
+function watchJob(
+  jobId: string,
+  threadKey: string,
+  previous: { job: JobProgress; builtVersion: number | null } | null = null
+) {
   void streamJobProgress(jobId, (progress) => {
     if (activeThread?.threadKey !== threadKey) return; // user switched threads mid-stream
+    if (progress.status === "error" && previous) {
+      restoreAfterFailedUpdate(previous.job, previous.builtVersion, progress.message ?? "update_failed");
+      return;
+    }
     activeJob = progress;
     executeStatus = progress.status === "done" ? "done" : progress.status === "error" ? "error" : "running";
     broadcast({ type: "job_update", threadKey, job: progress, status: executeStatus });
@@ -156,6 +197,10 @@ function watchJob(jobId: string, threadKey: string) {
   }).then((result) => {
     if (activeThread?.threadKey !== threadKey) return;
     if (!result.ok) {
+      if (previous) {
+        restoreAfterFailedUpdate(previous.job, previous.builtVersion, result.message);
+        return;
+      }
       executeStatus = "error";
       executeError = result.message;
       broadcast({ type: "job_error", threadKey, message: result.message });
@@ -178,9 +223,13 @@ chrome.runtime.onConnect.addListener((port) => {
           activeThread = { ...activeThread, messageCount: activeMessages.length, lastMessageId: activeMessages.at(-1)?.id ?? null };
           resetSuggestionState();
           resetEstimates();
-          resetPlanState(meta.planId);
+          resetPlanState(meta.planId, meta.planVersion);
           resetExecuteState();
           if (meta.jobId) {
+            // Jobs created before builtPlanVersion was tracked: assume the
+            // project matches the plan as it is now, so the next revision
+            // unlocks "Update project".
+            builtPlanVersion = meta.builtPlanVersion ?? activePlan?.version ?? 1;
             // Job may already be finished server-side; the stream should
             // still report its final status when we re-subscribe.
             activeJob = { jobId: meta.jobId, status: "running", message: null, percent: null };
@@ -299,7 +348,7 @@ function handleCreatePlan(attachment: string, files: Attachment[]) {
     if (result.ok) {
       activePlan = result.plan;
       planStatus = "ready";
-      void saveThreadMeta(threadKey, { planId: result.plan.planId });
+      void saveThreadMeta(threadKey, { planId: result.plan.planId, planVersion: result.plan.version });
       broadcast({ type: "plan_update", threadKey, plan: result.plan, status: "ready" });
       void refreshBalance();
     } else {
@@ -331,7 +380,9 @@ function handleRevisePlan(note: string, files: Attachment[]) {
     if (result.ok) {
       activePlan = result.plan;
       planStatus = "ready";
+      void saveThreadMeta(threadKey, { planVersion: result.plan.version });
       broadcast({ type: "plan_update", threadKey, plan: result.plan, status: "ready" });
+      void broadcastState(); // the new version may unlock "Update project"
       void refreshBalance();
     } else {
       planStatus = "error";
@@ -341,9 +392,17 @@ function handleRevisePlan(note: string, files: Attachment[]) {
   });
 }
 
-function handleExecutePlan() {
+/**
+ * "new" builds the project from scratch. "update" re-runs the revised plan
+ * on top of the finished project, so only the changes are generated — the
+ * server charges less for that than for a fresh build.
+ */
+function handleExecutePlan(mode: "new" | "update") {
   if (!activeThread || !activePlan) return;
-  if (!hasEnoughCredits("execute")) {
+  const previousJob = mode === "update" && executeStatus === "done" ? activeJob : null;
+  if (mode === "update" && !previousJob) return;
+  const previous = previousJob ? { job: previousJob, builtVersion: builtPlanVersion } : null;
+  if (!hasEnoughCredits(mode === "update" ? "execute_update" : "execute")) {
     executeStatus = "error";
     executeError = "insufficient_credits";
     broadcast({ type: "job_error", threadKey: activeThread.threadKey, message: "insufficient_credits" });
@@ -352,15 +411,20 @@ function handleExecutePlan() {
 
   const threadKey = activeThread.threadKey;
   const planId = activePlan.planId;
+  const planVersion = activePlan.version;
 
   executeStatus = "starting";
   executeError = null;
   activeJob = null;
   void broadcastState();
 
-  void executePlan(planId).then((result) => {
+  void executePlan(planId, previous?.job.jobId).then((result) => {
     if (activeThread?.threadKey !== threadKey) return;
     if (!result.ok) {
+      if (previous) {
+        restoreAfterFailedUpdate(previous.job, previous.builtVersion, result.message);
+        return;
+      }
       executeStatus = "error";
       executeError = result.message;
       broadcast({ type: "job_error", threadKey, message: result.message });
@@ -368,10 +432,140 @@ function handleExecutePlan() {
     }
     activeJob = { jobId: result.jobId, status: "queued", message: null, percent: null };
     executeStatus = "running";
-    void saveThreadMeta(threadKey, { jobId: result.jobId });
+    builtPlanVersion = planVersion;
+    void saveThreadMeta(threadKey, { jobId: result.jobId, builtPlanVersion: planVersion });
     broadcast({ type: "job_update", threadKey, job: activeJob, status: "running" });
-    watchJob(result.jobId, threadKey);
+    watchJob(result.jobId, threadKey, previous);
   });
+}
+
+// ---------- "Change project" (edit session) ----------
+
+function setEdit(patch: Partial<EditSession>) {
+  if (!editSession) return;
+  editSession = { ...editSession, ...patch };
+  void chrome.storage.session.set({ [EDIT_SESSION_KEY]: editSession }).catch(() => undefined);
+  void broadcastState();
+}
+
+function closeEdit() {
+  editSession = null;
+  void chrome.storage.session.remove(EDIT_SESSION_KEY).catch(() => undefined);
+  void broadcastState();
+}
+
+function watchEditJob(jobId: string) {
+  void streamJobProgress(jobId, (progress) => {
+    const session = editSession;
+    if (session?.job?.jobId !== jobId) return; // closed or replaced meanwhile
+    const status: ExecuteStatus = progress.status === "done" ? "done" : progress.status === "error" ? "error" : "running";
+    if (progress.status === "done") {
+      // The updated project becomes the base for the next round of changes.
+      setEdit({ job: progress, executeStatus: status, baseJobId: jobId, builtVersion: session.plan.version });
+      void refreshBalance();
+    } else {
+      setEdit({ job: progress, executeStatus: status, executeError: progress.status === "error" ? progress.message : null });
+    }
+  }).then((result) => {
+    if (editSession?.job?.jobId !== jobId) return;
+    if (!result.ok) setEdit({ executeStatus: "error", executeError: result.message });
+  });
+}
+
+async function refreshEditEstimates() {
+  const session = editSession;
+  if (!session) return;
+  const categorySlug = session.categorySlug ?? undefined;
+  // The plan itself (a few KB of JSON) is the revise call's main input.
+  const [revise, update] = await Promise.all([
+    fetchEstimate("plan_revise", 4000, categorySlug),
+    fetchEstimate("execute_update", 0, categorySlug)
+  ]);
+  if (editSession?.plan.planId !== session.plan.planId) return;
+  setEdit({
+    reviseEstimate: revise.ok ? revise.estimate.credits : null,
+    updateEstimate: update.ok ? update.estimate.credits : null
+  });
+}
+
+function editHasEnoughCredits(cost: number | null): boolean {
+  return !(creditBalance !== null && cost !== null && creditBalance < cost);
+}
+
+function handleEditRevise(note: string, files: Attachment[]) {
+  const session = editSession;
+  if (!session || !note.trim()) return;
+  if (!editHasEnoughCredits(session.reviseEstimate)) {
+    setEdit({ planStatus: "error", planError: "insufficient_credits" });
+    return;
+  }
+  const planId = session.plan.planId;
+  setEdit({ planStatus: "revising", planError: null });
+  void revisePlan(planId, note, files).then((result) => {
+    if (editSession?.plan.planId !== planId) return;
+    if (result.ok) {
+      setEdit({ plan: result.plan, planStatus: "ready" });
+      void refreshBalance();
+    } else {
+      setEdit({ planStatus: "error", planError: result.message });
+    }
+  });
+}
+
+function handleEditUpdate() {
+  const session = editSession;
+  if (!session || session.executeStatus === "starting" || session.executeStatus === "running") return;
+  if (!editHasEnoughCredits(session.updateEstimate)) {
+    setEdit({ executeStatus: "error", executeError: "insufficient_credits" });
+    return;
+  }
+  const planId = session.plan.planId;
+  setEdit({ executeStatus: "starting", executeError: null, job: null });
+  void executePlan(planId, session.baseJobId).then((result) => {
+    if (editSession?.plan.planId !== planId) return;
+    if (!result.ok) {
+      setEdit({ executeStatus: "error", executeError: result.message });
+      return;
+    }
+    setEdit({ job: { jobId: result.jobId, status: "queued", message: null, percent: null }, executeStatus: "running" });
+    watchEditJob(result.jobId);
+  });
+}
+
+type EditProjectRequest = { planId: string; jobId: string; title: string; categorySlug: string | null; version: number };
+
+function isEditProjectRequest(value: unknown): value is EditProjectRequest {
+  const v = value as Partial<EditProjectRequest> | null;
+  return (
+    !!v &&
+    typeof v.planId === "string" &&
+    typeof v.jobId === "string" &&
+    typeof v.title === "string" &&
+    typeof v.version === "number" &&
+    (v.categorySlug === null || typeof v.categorySlug === "string")
+  );
+}
+
+function startEditSession(request: EditProjectRequest) {
+  const categorySlug = CATEGORY_SLUGS.includes(request.categorySlug as CategorySlug) ? (request.categorySlug as CategorySlug) : null;
+  editSession = {
+    title: request.title.slice(0, 200),
+    categorySlug,
+    plan: { planId: request.planId, version: request.version, status: "ready", pdfUrl: null },
+    planStatus: "ready",
+    planError: null,
+    baseJobId: request.jobId,
+    builtVersion: request.version,
+    job: null,
+    executeStatus: "idle",
+    executeError: null,
+    reviseEstimate: null,
+    updateEstimate: null
+  };
+  void chrome.storage.session.set({ [EDIT_SESSION_KEY]: editSession }).catch(() => undefined);
+  void broadcastState();
+  void refreshEditEstimates();
+  void refreshBalance();
 }
 
 chrome.runtime.onMessage.addListener((message: PanelToBackgroundMsg | { type: "fetch_selectors" }, _sender, sendResponse) => {
@@ -382,7 +576,7 @@ chrome.runtime.onMessage.addListener((message: PanelToBackgroundMsg | { type: "f
 
   switch (message.type) {
     case "get_state":
-      void isAuthenticated().then(async (authenticated) => {
+      void editSessionRestored.then(isAuthenticated).then(async (authenticated) => {
         if (authenticated && creditBalanceStatus === "idle") void refreshBalance();
         sendResponse(panelState(authenticated));
       });
@@ -435,10 +629,28 @@ chrome.runtime.onMessage.addListener((message: PanelToBackgroundMsg | { type: "f
       if (activePlan) chrome.tabs.create({ url: planUrl(activePlan.planId) });
       return false;
     case "execute_plan":
-      handleExecutePlan();
+      handleExecutePlan("new");
+      return false;
+    case "update_project":
+      handleExecutePlan("update");
       return false;
     case "open_project":
       if (activeJob) chrome.tabs.create({ url: projectUrl(activeJob.jobId) });
+      return false;
+    case "edit_revise_plan":
+      handleEditRevise(message.note, message.files);
+      return false;
+    case "edit_update_project":
+      handleEditUpdate();
+      return false;
+    case "edit_open_plan":
+      if (editSession) chrome.tabs.create({ url: planUrl(editSession.plan.planId) });
+      return false;
+    case "edit_open_project":
+      if (editSession) chrome.tabs.create({ url: projectUrl(editSession.job?.status === "done" ? editSession.job.jobId : editSession.baseJobId) });
+      return false;
+    case "close_edit":
+      closeEdit();
       return false;
     default:
       return false;
@@ -449,7 +661,7 @@ chrome.runtime.onMessage.addListener((message: PanelToBackgroundMsg | { type: "f
 // credit-balance updates after a purchase, through externally_connectable
 // (plan §6). Exact "credits_updated" message shape is assumed — refetch the
 // balance from the server rather than trusting a pushed number.
-chrome.runtime.onMessageExternal.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
   if (message?.type === "auth_code") {
     void exchangeCode(message.code).then((ok) => {
       if (ok) {
@@ -463,6 +675,25 @@ chrome.runtime.onMessageExternal.addListener((message, _sender, sendResponse) =>
   if (message?.type === "credits_updated") {
     void refreshBalance();
     sendResponse({ ok: true });
+    return true;
+  }
+  if (message?.type === "edit_project") {
+    if (!isEditProjectRequest(message)) {
+      sendResponse({ ok: false });
+      return false;
+    }
+    startEditSession(message);
+    // sidePanel.open needs Chrome 116+ and a user gesture; when either is
+    // missing the page tells the user to click the toolbar icon instead.
+    const windowId = sender.tab?.windowId;
+    if (windowId === undefined || typeof chrome.sidePanel.open !== "function") {
+      sendResponse({ ok: true, opened: false });
+      return false;
+    }
+    chrome.sidePanel
+      .open({ windowId })
+      .then(() => sendResponse({ ok: true, opened: true }))
+      .catch(() => sendResponse({ ok: true, opened: false }));
     return true;
   }
   return false;
