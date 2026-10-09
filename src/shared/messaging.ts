@@ -7,6 +7,28 @@ export type EstimateAction = Estimate["action"];
 export type PlanStatus = "idle" | "building" | "ready" | "revising" | "error";
 export type ExecuteStatus = "idle" | "starting" | "running" | "done" | "error";
 
+/**
+ * "Change project" opened from leverora.com/account/projects: the panel edits
+ * an already-built project (revise its plan, then update the project) without
+ * needing the Upwork thread it came from.
+ */
+export type EditSession = {
+  title: string;
+  categorySlug: CategorySlug | null;
+  plan: PlanRef;
+  planStatus: PlanStatus;
+  planError: string | null;
+  /** The project being changed — its files are the starting point of an update. */
+  baseJobId: string;
+  /** Plan version baseJobId was built from; an update is offered once the plan is newer. */
+  builtVersion: number;
+  job: JobProgress | null;
+  executeStatus: ExecuteStatus;
+  executeError: string | null;
+  reviseEstimate: number | null;
+  updateEstimate: number | null;
+};
+
 // Long-lived port messages: content script <-> background (streamed reads).
 export type ContentToBackgroundMsg =
   | { type: "thread_detected"; thread: Thread }
@@ -33,7 +55,13 @@ export type PanelToBackgroundMsg =
   | { type: "revise_plan"; note: string; files: Attachment[] }
   | { type: "open_plan" }
   | { type: "execute_plan" }
-  | { type: "open_project" };
+  | { type: "update_project" }
+  | { type: "open_project" }
+  | { type: "edit_revise_plan"; note: string; files: Attachment[] }
+  | { type: "edit_update_project" }
+  | { type: "edit_open_plan" }
+  | { type: "edit_open_project" }
+  | { type: "close_edit" };
 
 export type BackgroundToPanelMsg =
   | {
@@ -54,6 +82,9 @@ export type BackgroundToPanelMsg =
       job: JobProgress | null;
       executeStatus: ExecuteStatus;
       executeError: string | null;
+      /** Plan version the current project was built from (null when nothing was built yet). */
+      builtPlanVersion: number | null;
+      editSession: EditSession | null;
     }
   | { type: "thread_updated"; thread: Thread; messages: Msg[] }
   | { type: "suggestions_update"; threadKey: string; suggestion: Suggestion; done: boolean }
