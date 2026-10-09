@@ -56,7 +56,7 @@ export type PlanRef = {
 };
 
 export type Estimate = {
-  action: "suggest" | "plan" | "plan_revise" | "execute";
+  action: "suggest" | "plan" | "plan_revise" | "execute" | "execute_update";
   credits: number;
 };
 
