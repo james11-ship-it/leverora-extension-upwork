@@ -111,7 +111,7 @@ describe("executePlan", () => {
 
   it("reports failure on a non-ok response", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 402 })));
-    expect(await executePlan("plan_1")).toEqual({ ok: false, message: "execute_failed_402" });
+    expect(await executePlan("plan_1")).toEqual({ ok: false, message: "insufficient_credits" });
   });
 });
 
