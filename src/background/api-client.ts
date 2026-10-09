@@ -64,11 +64,13 @@ export async function fetchBalance(): Promise<BalanceResult> {
 
 export type EstimateResult = { ok: true; estimate: Estimate } | { ok: false; message: string };
 
-export async function fetchEstimate(action: Estimate["action"], contextLength: number): Promise<EstimateResult> {
+export async function fetchEstimate(action: Estimate["action"], contextLength: number, categorySlug?: CategorySlug): Promise<EstimateResult> {
   try {
     const response = await authedFetch("/api/estimate", {
       method: "POST",
-      body: JSON.stringify({ action, contextLength })
+      // categorySlug lets the server size execute/execute_update to this
+      // category's real ceiling instead of the all-categories worst case.
+      body: JSON.stringify(categorySlug ? { action, contextLength, categorySlug } : { action, contextLength })
     });
     if (!response.ok) return { ok: false, message: `estimate_failed_${response.status}` };
     const payload = (await response.json()) as { credits: number };
@@ -195,11 +197,16 @@ export type ExecuteResult = { ok: true; jobId: string } | { ok: false; message: 
 // Response shape assumption (plan §6 only names the output "job_id").
 type ExecuteResponse = { job_id: string };
 
-export async function executePlan(planId: string): Promise<ExecuteResult> {
+/**
+ * `previousJobId` turns this into an update: the server starts from that
+ * project's files and only generates the changes the revised plan asks for,
+ * which costs fewer credits than a fresh build.
+ */
+export async function executePlan(planId: string, previousJobId?: string): Promise<ExecuteResult> {
   try {
     const response = await authedFetch("/api/execute", {
       method: "POST",
-      body: JSON.stringify({ plan_id: planId })
+      body: JSON.stringify(previousJobId ? { plan_id: planId, previous_job_id: previousJobId } : { plan_id: planId })
     });
     if (!response.ok) return { ok: false, message: failureMessage("execute_failed", response.status) };
     const payload = (await response.json()) as ExecuteResponse;
