@@ -6,10 +6,14 @@ export type ThreadMeta = {
   categorySlug: CategorySlug | null;
   briefNotes: string;
   planId: string | null;
+  /** Last known plan version — restored on thread re-open so the panel shows the real version, not 1. */
+  planVersion: number | null;
   jobId: string | null;
+  /** Plan version jobId was built from; a newer plan version unlocks "Update project". */
+  builtPlanVersion: number | null;
 };
 
-const DEFAULT_META: ThreadMeta = { categorySlug: null, briefNotes: "", planId: null, jobId: null };
+const DEFAULT_META: ThreadMeta = { categorySlug: null, briefNotes: "", planId: null, planVersion: null, jobId: null, builtPlanVersion: null };
 
 /**
  * Category and brief notes must survive service worker restarts and SPA
